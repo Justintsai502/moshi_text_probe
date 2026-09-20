@@ -21,6 +21,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -125,6 +126,7 @@ class Result:
     n_generated: int = 0
     stopped_on: str = ""
     reference: str | None = None
+    meta: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------
@@ -346,6 +348,29 @@ class DryBackend:
         return res
 
 
+NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def check_rewrite(rewritten: str, reference: str, args) -> tuple[bool, str]:
+    """SDFT's verification step: keep the rewrite only if it is a faithful,
+    similarly short restatement; otherwise the original answer is kept."""
+    if not rewritten:
+        return False, "empty"
+    if rewritten.strip() == (reference or "").strip():
+        return False, "identical"
+    ref_nums = NUM_RE.findall(reference or "")
+    new_nums = NUM_RE.findall(rewritten)
+    if sorted(ref_nums) != sorted(new_nums):
+        return False, f"numbers changed {ref_nums}->{new_nums}"
+    ref_w = max(1, len((reference or "").split()))
+    ratio = len(rewritten.split()) / ref_w
+    if ratio > args.max_len_ratio:
+        return False, f"too long ({ratio:.2f}x)"
+    if ratio < args.min_len_ratio:
+        return False, f"too short ({ratio:.2f}x)"
+    return True, ""
+
+
 # --------------------------------------------------------------------------
 def load_questions(path: str | None) -> list[str]:
     if not path:
@@ -368,6 +393,13 @@ def main() -> int:
                     help="JSONL of {\"instruction\":..., \"response\":...} — runs the SDFT "
                          "rewrite task on each pair instead of plain prompting")
     ap.add_argument("--style", default="qa", choices=["plain", "qa", "chat", "fewshot"])
+    ap.add_argument("--distilled-out", default="",
+                    help="with --pairs: write the distilled dataset here (JSONL, original "
+                         "fields + response_rewritten, failing rewrites fall back)")
+    ap.add_argument("--max-len-ratio", type=float, default=1.6,
+                    help="reject a rewrite longer than this multiple of the original")
+    ap.add_argument("--min-len-ratio", type=float, default=0.5,
+                    help="reject a rewrite shorter than this multiple of the original")
     ap.add_argument("--sdft-style", default="generic", choices=["generic", "agent"],
                     help="'agent': keep the AI-Agent persona (one short factual sentence)")
     ap.add_argument("--end-marker", default="###",
@@ -403,13 +435,15 @@ def main() -> int:
                 continue
             obj = json.loads(line)
             instr, ref = obj["instruction"], obj["response"]
-            items.append((instr, build_sdft_prompt(instr, ref, args.end_marker, args.sdft_style), ref))
+            items.append((instr,
+                          build_sdft_prompt(instr, ref, args.end_marker, args.sdft_style),
+                          ref, obj))
         if not args.stop_str:
             args.stop_str = [args.end_marker]
     else:
-        items = [(q, build_prompt(q, args.style, args.end_marker), None)
+        items = [(q, build_prompt(q, args.style, args.end_marker), None, {})
                  for q in load_questions(args.questions or None)]
-    questions = [q for q, _, _ in items]
+    questions = [q for q, _, _, _ in items]
     print(f"[cfg] style={args.style} mask_pad={args.mask_pad} temp={args.temp} "
           f"top_k={args.top_k} max_new_tokens={args.max_new_tokens} n_questions={len(questions)}",
           flush=True)
@@ -424,18 +458,44 @@ def main() -> int:
         backend = RealBackend(args)
 
     results = []
-    for q, prompt, ref in items:
+    for q, prompt, ref, meta in items:
         print(f"\n=== {q}", flush=True)
         if ref is not None:
             print(f"  reference: {ref!r}", flush=True)
         res = backend.generate(q, prompt, args)
         res.reference = ref
+        res.meta = meta
         if res.first_step_top5:
             top = ", ".join(f"{p!r}:{prob:.3f}" for p, _, prob in res.first_step_top5)
             print(f"  top5@first_step: {top}", flush=True)
             print(f"  P(PAD)@first_step: {res.pad_prob_first_step:.3f}", flush=True)
         print(f"  -> {res.completion!r}  [{res.n_generated} tokens, {res.stopped_on}]", flush=True)
         results.append(res.__dict__)
+
+    if args.distilled_out and args.pairs:
+        n_ok, n_fallback, reasons = 0, 0, {}
+        with open(args.distilled_out, "w") as f:
+            for r in results:
+                row = dict(r["meta"])
+                rewritten = (r["completion"] or "").strip()
+                ok, why = check_rewrite(rewritten, r["reference"], args)
+                row["response_original"] = r["reference"]
+                row["response_rewritten"] = rewritten
+                # SDFT keeps the original answer whenever the rewrite fails its check
+                row["response"] = rewritten if ok else r["reference"]
+                row["rewrite_ok"] = ok
+                row["rewrite_reject_reason"] = why
+                row["stopped_on"] = r["stopped_on"]
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                if ok:
+                    n_ok += 1
+                else:
+                    n_fallback += 1
+                    reasons[why] = reasons.get(why, 0) + 1
+        print(f"\n[distill] kept {n_ok} rewrites, fell back {n_fallback} times "
+              f"-> {args.distilled_out}")
+        for why, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
+            print(f"  {why}: {n}")
 
     Path(args.out).write_text(json.dumps(
         {"config": vars(args), "results": results}, indent=2, ensure_ascii=False))
