@@ -72,8 +72,31 @@ Two of the planets in our Solar System are Mars and Venus.
 """
 
 
-def build_sdft_prompt(instruction: str, reference: str, end_marker: str = "###") -> str:
-    return SDFT_TEMPLATE.format(instruction=instruction, reference=reference, end=end_marker)
+#: Same idea, but for the AI-Agent dialogues: the persona answers a question put
+#: to it with ONE short factual sentence, so the worked example must demonstrate
+#: a rewrite that stays that short. The generic template drifts chatty.
+SDFT_AGENT_TEMPLATE = """You are an AI assistant in a room with several people. When someone asks you a question, you answer with one short factual sentence. Below is a question and a reference answer. Rewrite the answer in your own words, keeping the same facts and the same length. Finish with {end}.
+
+### Question:
+AI Agent, how tall is Mount Everest?
+### Reference Answer:
+Mount Everest is 8,849 meters tall.
+### Your answer:
+Mount Everest stands 8,849 meters high.
+{end}
+
+### Question:
+{instruction}
+### Reference Answer:
+{reference}
+### Your answer:
+"""
+
+
+def build_sdft_prompt(instruction: str, reference: str, end_marker: str = "###",
+                      sdft_style: str = "generic") -> str:
+    tpl = SDFT_AGENT_TEMPLATE if sdft_style == "agent" else SDFT_TEMPLATE
+    return tpl.format(instruction=instruction, reference=reference, end=end_marker)
 
 
 def build_prompt(question: str, style: str, end_marker: str = "###") -> str:
@@ -345,6 +368,8 @@ def main() -> int:
                     help="JSONL of {\"instruction\":..., \"response\":...} — runs the SDFT "
                          "rewrite task on each pair instead of plain prompting")
     ap.add_argument("--style", default="qa", choices=["plain", "qa", "chat", "fewshot"])
+    ap.add_argument("--sdft-style", default="generic", choices=["generic", "agent"],
+                    help="'agent': keep the AI-Agent persona (one short factual sentence)")
     ap.add_argument("--end-marker", default="###",
                     help="terminator demonstrated by --style fewshot; also used as a stop string")
     ap.add_argument("--max-new-tokens", type=int, default=48)
@@ -378,7 +403,7 @@ def main() -> int:
                 continue
             obj = json.loads(line)
             instr, ref = obj["instruction"], obj["response"]
-            items.append((instr, build_sdft_prompt(instr, ref, args.end_marker), ref))
+            items.append((instr, build_sdft_prompt(instr, ref, args.end_marker, args.sdft_style), ref))
         if not args.stop_str:
             args.stop_str = [args.end_marker]
     else:
