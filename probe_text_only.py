@@ -176,6 +176,13 @@ class RealBackend:
                     res.stopped_on = "eos"
                     break
                 out_ids.append(nxt)
+
+                hit = self._hit_stop(out_ids, args.stop_str)
+                if hit is not None:
+                    out_ids = hit[0]
+                    res.stopped_on = f"stop_str {hit[1]!r}"
+                    break
+
                 logits = self._step(self._frame(nxt))
             else:
                 res.stopped_on = "max_new_tokens"
@@ -184,6 +191,19 @@ class RealBackend:
         res.n_generated = len(out_ids)
         res.completion = self.spm.decode(out_ids)
         return res
+
+    def _hit_stop(self, out_ids: list[int], stop_strs: list[str]):
+        """Return (truncated_ids, matched) once a stop string appears, else None."""
+        if not stop_strs:
+            return None
+        text = self.spm.decode(out_ids)
+        for s in stop_strs:
+            s = s.replace("\\n", "\n")
+            idx = text.find(s)
+            if idx >= 0:
+                kept = text[:idx]
+                return self.spm.encode(kept), s
+        return None
 
     def _pick(self, logits, args) -> int:
         torch = self.torch
@@ -265,7 +285,10 @@ def load_questions(path: str | None) -> list[str]:
     if not path:
         return DEFAULT_QUESTIONS
     lines = Path(path).read_text().splitlines()
-    return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+    # one prompt per line; literal "\n" in the file becomes a real newline, so
+    # multi-line prompts (e.g. the SDFT rewrite template) still fit on one line.
+    return [ln.strip().replace("\\n", "\n")
+            for ln in lines if ln.strip() and not ln.startswith("#")]
 
 
 def main() -> int:
@@ -277,6 +300,9 @@ def main() -> int:
     ap.add_argument("--questions", default="", help="file with one prompt per line")
     ap.add_argument("--style", default="qa", choices=["plain", "qa", "chat"])
     ap.add_argument("--max-new-tokens", type=int, default=48)
+    ap.add_argument("--stop-str", action="append", default=[],
+                    help="cut generation when this string appears (repeatable; use \\n for newline). "
+                         "Needed because the model happily keeps inventing follow-up questions.")
     ap.add_argument("--temp", type=float, default=0.0, help="0 = greedy")
     ap.add_argument("--top-k", type=int, default=25)
     ap.add_argument("--mask-pad", dest="mask_pad", action="store_true", default=True,

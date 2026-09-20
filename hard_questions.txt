@@ -1,0 +1,22 @@
+# Harder probes. Use --style plain (these prompts are self-contained) and
+# --stop-str, e.g.:
+#
+#   python probe_text_only.py --questions hard_questions.txt --style plain \
+#       --max-new-tokens 96 --stop-str '\n\n' --stop-str 'Question:' \
+#       --out report_hard.json
+#
+# The first probe run showed knowledge is fine but the model never stops: it
+# keeps inventing follow-up questions. These target instruction-following,
+# the actual SDFT rewrite task, and multi-sentence coherence instead.
+
+Answer with exactly one word. What is the chemical symbol for gold?
+
+Answer in exactly one short sentence, then stop. Why is the sky blue?
+
+List exactly three fruits, separated by commas, and nothing else.
+
+Question: A shop sells pens at 3 dollars each. Tom buys 4 pens and pays with a 20-dollar bill. How much change does he get? Think step by step, then stop.\nAnswer:
+
+Below are an instruction that describes a task along with a reference answer. Using the reference answer as a guide, write your own response.\n\n### Instruction:\nName three types of machine learning algorithms.\n### Reference Answer:\nThree types of machine learning algorithms are supervised learning, unsupervised learning, and reinforcement learning.\n### Response:\n
+
+Below are an instruction that describes a task along with a reference answer. Using the reference answer as a guide, write your own response.\n\n### Instruction:\nWhat should I do if I get a small burn while cooking?\n### Reference Answer:\nRun cool water over the burn for about ten minutes, then cover it loosely with a clean dressing. Do not apply ice or butter.\n### Response:\n
