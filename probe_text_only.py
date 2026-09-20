@@ -91,10 +91,26 @@ class RealBackend:
 
         self.spm = spm_mod.SentencePieceProcessor(str(spm_path))
 
+        # API differs between forks:
+        #   upstream moshi   -> lm.forward_text(codes)
+        #   PersonaPlex fork -> lm.forward_codes(codes)  (= embed_codes + forward_embeddings)
+        # Both take [B, K, S] codes and return (transformer_out, text_logits).
+        for name in ("forward_codes", "forward_text"):
+            if hasattr(lm, name):
+                self._fwd = getattr(lm, name)
+                self._fwd_name = name
+                break
+        else:
+            raise AttributeError(
+                "LMModel exposes neither forward_codes nor forward_text; "
+                f"available: {[a for a in dir(lm) if a.startswith('forward')]}"
+            )
+
         self.K = lm.num_codebooks
         self.device = args.device
         self.pad_id = lm.text_padding_token_id
         self.epad_id = lm.end_of_text_padding_id
+        print(f"[info] temporal forward: lm.{self._fwd_name}()", flush=True)
         print(
             f"[info] num_codebooks={self.K} dep_q={lm.dep_q} text_card={lm.text_card} "
             f"pad={self.pad_id} epad={self.epad_id} delays[0]={lm.delays[0]}",
@@ -120,9 +136,9 @@ class RealBackend:
         return init
 
     def _step(self, frame):
-        # forward_text embeds all 17 streams, runs the Temporal Transformer and
-        # the text head. Audio entries are -1 -> embedding is exactly zero.
-        _, text_logits = self.lm.forward_text(frame)
+        # Embeds all 17 streams, runs the Temporal Transformer and the text head.
+        # Audio entries are -1 -> ScaledEmbedding returns exactly zero for them.
+        _, text_logits = self._fwd(frame)
         return text_logits[0, 0, -1].float()
 
     # -- generation -------------------------------------------------------
