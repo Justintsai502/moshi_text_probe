@@ -52,6 +52,30 @@ Question: {q}
 Answer:"""
 
 
+#: The rewrite task itself (arXiv:2402.13669, Figure 3), wrapped in one worked
+#: example so an unaligned base LM copies the format — including the terminator.
+SDFT_TEMPLATE = """Below are an instruction that describes a task along with a reference answer. Using the reference answer as a guide, write your own response. Finish your response with {end}.
+
+### Instruction:
+Name two planets in the Solar System.
+### Reference Answer:
+Two planets in the Solar System are Mars and Venus.
+### Response:
+Two of the planets in our Solar System are Mars and Venus.
+{end}
+
+### Instruction:
+{instruction}
+### Reference Answer:
+{reference}
+### Response:
+"""
+
+
+def build_sdft_prompt(instruction: str, reference: str, end_marker: str = "###") -> str:
+    return SDFT_TEMPLATE.format(instruction=instruction, reference=reference, end=end_marker)
+
+
 def build_prompt(question: str, style: str, end_marker: str = "###") -> str:
     if style == "plain":
         return question
@@ -77,6 +101,7 @@ class Result:
     pad_prob_first_step: float | None = None
     n_generated: int = 0
     stopped_on: str = ""
+    reference: str | None = None
 
 
 # --------------------------------------------------------------------------
@@ -162,9 +187,8 @@ class RealBackend:
         return text_logits[0, 0, -1].float()
 
     # -- generation -------------------------------------------------------
-    def generate(self, question: str, args) -> Result:
+    def generate(self, question: str, prompt: str, args) -> Result:
         torch = self.torch
-        prompt = build_prompt(question, args.style, args.end_marker)
         prompt_ids = self.spm.encode(prompt)
         res = Result(question=question, prompt=prompt, completion="")
 
@@ -266,8 +290,7 @@ class DryBackend:
     def _fake_logits(self) -> list[float]:
         return [self.rng.random() for _ in range(64)] + [0.0] * (self.VOCAB - 64)
 
-    def generate(self, question: str, args) -> Result:
-        prompt = build_prompt(question, args.style, args.end_marker)
+    def generate(self, question: str, prompt: str, args) -> Result:
         ids = self._encode(prompt)
         res = Result(question=question, prompt=prompt, completion="")
 
@@ -318,6 +341,9 @@ def main() -> int:
     ap.add_argument("--weights", default="", help="override path to model.safetensors")
     ap.add_argument("--tokenizer", default="", help="override path to the SentencePiece model")
     ap.add_argument("--questions", default="", help="file with one prompt per line")
+    ap.add_argument("--pairs", default="",
+                    help="JSONL of {\"instruction\":..., \"response\":...} — runs the SDFT "
+                         "rewrite task on each pair instead of plain prompting")
     ap.add_argument("--style", default="qa", choices=["plain", "qa", "chat", "fewshot"])
     ap.add_argument("--end-marker", default="###",
                     help="terminator demonstrated by --style fewshot; also used as a stop string")
@@ -344,7 +370,21 @@ def main() -> int:
     if args.style == "fewshot" and not args.stop_str:
         args.stop_str = [args.end_marker]
 
-    questions = load_questions(args.questions or None)
+    if args.pairs:
+        items = []
+        for line in Path(args.pairs).read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            obj = json.loads(line)
+            instr, ref = obj["instruction"], obj["response"]
+            items.append((instr, build_sdft_prompt(instr, ref, args.end_marker), ref))
+        if not args.stop_str:
+            args.stop_str = [args.end_marker]
+    else:
+        items = [(q, build_prompt(q, args.style, args.end_marker), None)
+                 for q in load_questions(args.questions or None)]
+    questions = [q for q, _, _ in items]
     print(f"[cfg] style={args.style} mask_pad={args.mask_pad} temp={args.temp} "
           f"top_k={args.top_k} max_new_tokens={args.max_new_tokens} n_questions={len(questions)}",
           flush=True)
@@ -359,9 +399,12 @@ def main() -> int:
         backend = RealBackend(args)
 
     results = []
-    for q in questions:
+    for q, prompt, ref in items:
         print(f"\n=== {q}", flush=True)
-        res = backend.generate(q, args)
+        if ref is not None:
+            print(f"  reference: {ref!r}", flush=True)
+        res = backend.generate(q, prompt, args)
+        res.reference = ref
         if res.first_step_top5:
             top = ", ".join(f"{p!r}:{prob:.3f}" for p, _, prob in res.first_step_top5)
             print(f"  top5@first_step: {top}", flush=True)
