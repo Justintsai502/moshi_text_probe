@@ -34,7 +34,25 @@ DEFAULT_QUESTIONS = [
 # --------------------------------------------------------------------------
 # prompt styles
 # --------------------------------------------------------------------------
-def build_prompt(question: str, style: str) -> str:
+#: Few-shot header. The model is a *base* LM in text-only mode — it was never
+#: aligned on this regime, so it has no notion of "the answer is finished": in
+#: speech mode a turn ends with PAD/silence, not EOS. The fix is to demonstrate
+#: the format, terminator included, and then stop on that terminator.
+FEWSHOT_TEMPLATE = """Answer each question briefly, then write {end} on its own line.
+
+Question: What is the capital of Japan?
+Answer: Tokyo.
+{end}
+
+Question: How many legs does a spider have?
+Answer: Eight.
+{end}
+
+Question: {q}
+Answer:"""
+
+
+def build_prompt(question: str, style: str, end_marker: str = "###") -> str:
     if style == "plain":
         return question
     if style == "qa":
@@ -44,6 +62,8 @@ def build_prompt(question: str, style: str) -> str:
             "You are a helpful assistant. Answer the question briefly.\n"
             f"User: {question}\nAssistant:"
         )
+    if style == "fewshot":
+        return FEWSHOT_TEMPLATE.format(q=question, end=end_marker)
     raise ValueError(f"unknown style: {style}")
 
 
@@ -144,7 +164,7 @@ class RealBackend:
     # -- generation -------------------------------------------------------
     def generate(self, question: str, args) -> Result:
         torch = self.torch
-        prompt = build_prompt(question, args.style)
+        prompt = build_prompt(question, args.style, args.end_marker)
         prompt_ids = self.spm.encode(prompt)
         res = Result(question=question, prompt=prompt, completion="")
 
@@ -247,7 +267,7 @@ class DryBackend:
         return [self.rng.random() for _ in range(64)] + [0.0] * (self.VOCAB - 64)
 
     def generate(self, question: str, args) -> Result:
-        prompt = build_prompt(question, args.style)
+        prompt = build_prompt(question, args.style, args.end_marker)
         ids = self._encode(prompt)
         res = Result(question=question, prompt=prompt, completion="")
 
@@ -298,7 +318,9 @@ def main() -> int:
     ap.add_argument("--weights", default="", help="override path to model.safetensors")
     ap.add_argument("--tokenizer", default="", help="override path to the SentencePiece model")
     ap.add_argument("--questions", default="", help="file with one prompt per line")
-    ap.add_argument("--style", default="qa", choices=["plain", "qa", "chat"])
+    ap.add_argument("--style", default="qa", choices=["plain", "qa", "chat", "fewshot"])
+    ap.add_argument("--end-marker", default="###",
+                    help="terminator demonstrated by --style fewshot; also used as a stop string")
     ap.add_argument("--max-new-tokens", type=int, default=48)
     ap.add_argument("--stop-str", action="append", default=[],
                     help="cut generation when this string appears (repeatable; use \\n for newline). "
@@ -318,6 +340,9 @@ def main() -> int:
     ap.add_argument("--out", default="report.json")
     ap.add_argument("--dry-run", action="store_true", help="no torch, no weights: check the flow only")
     args = ap.parse_args()
+
+    if args.style == "fewshot" and not args.stop_str:
+        args.stop_str = [args.end_marker]
 
     questions = load_questions(args.questions or None)
     print(f"[cfg] style={args.style} mask_pad={args.mask_pad} temp={args.temp} "
