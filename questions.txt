@@ -1,0 +1,14 @@
+# One prompt per line. Blank lines and lines starting with # are ignored.
+# Kept deliberately trivial: the goal is to see whether the Temporal Transformer
+# still behaves like a text LM at all, not to measure its intelligence.
+
+What is one plus one?
+What is 2 + 3?
+The capital of France is
+Name three colors.
+How many days are there in a week?
+Water boils at what temperature in Celsius?
+Who wrote Romeo and Juliet?
+Translate to French: good morning
+Complete the sentence: The sun rises in the
+Is the Earth round or flat?

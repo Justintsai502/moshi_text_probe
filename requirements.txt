@@ -1,0 +1,23 @@
+# Probe dependencies.
+#
+# Install torch FIRST, matching the cluster's CUDA build, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# then:
+#   pip install -r requirements.txt
+
+torch>=2.2
+sentencepiece>=0.2.0
+safetensors>=0.4.0
+numpy>=1.24
+
+# --- moshi ---
+# Preferred: use the PersonaPlex checkout already on the machine, via PYTHONPATH:
+#   export PYTHONPATH=/path/to/personaplex/moshi:$PWD
+# In that case do NOT pip install moshi (it would shadow the fork).
+#
+# Only if no PersonaPlex checkout is available, uncomment:
+# moshi>=0.2.0
+
+# moshi's own imports, needed when it is used from PYTHONPATH rather than pip:
+einops>=0.7.0
+huggingface-hub>=0.24.0
