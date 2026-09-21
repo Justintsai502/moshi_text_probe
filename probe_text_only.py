@@ -519,7 +519,11 @@ def main() -> int:
             for r in results:
                 row = dict(r["meta"])
                 rewritten = (r["completion"] or "").strip()
-                ok, why = check_rewrite(rewritten, r["reference"], args)
+                if r.get("stopped_on") == "skipped_refusal":
+                    # never generated: the persona's refusal is kept as authored
+                    ok, why = False, "skipped: refusal"
+                else:
+                    ok, why = check_rewrite(rewritten, r["reference"], args)
                 row["response_original"] = r["reference"]
                 row["response_rewritten"] = rewritten
                 # SDFT keeps the original answer whenever the rewrite fails its check
@@ -533,7 +537,8 @@ def main() -> int:
                 else:
                     n_fallback += 1
                     reasons[why] = reasons.get(why, 0) + 1
-        print(f"\n[distill] kept {n_ok} rewrites, fell back {n_fallback} times "
+        print(f"\n[distill] kept {n_ok} rewrites, kept the original {n_fallback} times "
+              f"({100 * n_ok / max(1, n_ok + n_fallback):.0f}% rewritten) "
               f"-> {args.distilled_out}")
         for why, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
             print(f"  {why}: {n}")
