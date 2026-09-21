@@ -7,15 +7,18 @@ utterances in the same order, with the agent's answer text replaced.
 
 The original file is never touched.
 
-Timing: ``start``/``end`` are ABSOLUTE seconds from the top of the dialogue, so a
-rewrite that is longer or shorter than the original would silently change the
-gap that follows it. Every later utterance is therefore shifted by that
-difference (``--shift ripple``, the default), which keeps all gaps and overlaps
-exactly as authored; the dialogue simply gets a little longer or shorter.
+Timing: nothing existing is overwritten. ``start``, ``end`` and ``words`` keep
+their original values (they describe the original sentence and the audio that
+was synthesized from it); the reflowed estimate is added alongside as
 
-Durations come from the dataset's own estimator (syllables / (4 * rate/3) +
-0.04s per word; duration = last onset + average word slot) — the same
-placeholder timing the originals were built with, not a measurement of audio.
+    start_reflow / end_reflow / shift_reflow / words_reflow
+
+``start``/``end`` are ABSOLUTE seconds from the top of the dialogue, so a rewrite
+that changes length would change the gap that follows it — hence the reflow
+shifts every later utterance by that difference (``--shift ripple``, the
+default), keeping all gaps and overlaps as authored. Durations come from the
+dataset's own estimator (syllables / (4 * rate/3) + 0.04s per word; duration =
+last onset + average word slot): a placeholder, not a measurement of audio.
 """
 
 from __future__ import annotations
@@ -155,18 +158,22 @@ def main() -> int:
                     new_dur = (float(u.get("end", 0.0)) - orig_start) * factor
                 elif args.end_mode == "keep":
                     new_dur = float(u.get("end", 0.0)) - orig_start
+                orig_end = float(u.get("end", 0.0))
+                # Only `text` is replaced. Every original timing field is left
+                # exactly as it was; the reflowed estimate goes in new fields.
                 u["text_original"] = u.get("text")
-                u["end_original"] = u.get("end")
                 u["text"] = new_text
-                u["words"] = words
-                u["start"] = round(orig_start + sh, 4)
-                u["end"] = round(orig_start + sh + new_dur, 4)
+                u["words_reflow"] = words
+                u["start_reflow"] = round(orig_start + sh, 4)
+                u["end_reflow"] = round(orig_start + sh + new_dur, 4)
+                u["shift_reflow"] = round(sh, 4)
                 u["rewritten"] = True
                 hit += 1
-                max_shift[0] = max(max_shift[0], abs(new_dur - (float(u["end_original"]) - orig_start)))
+                max_shift[0] = max(max_shift[0], abs(new_dur - (orig_end - orig_start)))
             elif sh:
-                u["start"] = round(orig_start + sh, 4)
-                u["end"] = round(float(u.get("end", 0.0)) + sh, 4)
+                u["start_reflow"] = round(orig_start + sh, 4)
+                u["end_reflow"] = round(float(u.get("end", 0.0)) + sh, 4)
+                u["shift_reflow"] = round(sh, 4)
                 n_shifted[0] += 1
             out_lines.append(json.dumps(u, ensure_ascii=False))
 
@@ -191,8 +198,10 @@ def main() -> int:
             u = json.loads(line)
             if u.get("rewritten"):
                 print(f"  {u['utt_id']} ({u['speaker']})")
-                print(f"    was: {u['text_original']!r}  [{u.get('end_original')}]")
-                print(f"    now: {u['text']!r}  [{u.get('end')}]")
+                print(f"    was: {u['text_original']!r}")
+                print(f"         start/end kept at {u['start']} / {u['end']}")
+                print(f"    now: {u['text']!r}")
+                print(f"         start_reflow/end_reflow {u['start_reflow']} / {u['end_reflow']}")
     return 0
 
 
