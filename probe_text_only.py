@@ -348,6 +348,13 @@ class DryBackend:
         return res
 
 
+def row_key(meta: dict, question: str) -> str:
+    """Stable id for resume: the utterance it came from, else the question."""
+    if meta.get("dialogue") and meta.get("a_utt"):
+        return f"{meta['dialogue']}::{meta['a_utt']}"
+    return question
+
+
 NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
 #: The persona's refusals ("I don't have that information") must never be
@@ -424,6 +431,8 @@ def main() -> int:
                     default=True,
                     help="also try to rewrite refusals (they get fabricated into facts — "
                          "skipping them is the default)")
+    ap.add_argument("--resume", action="store_true",
+                    help="append to --distilled-out and skip rows already in it")
     ap.add_argument("--distilled-out", default="",
                     help="with --pairs: write the distilled dataset here (JSONL, original "
                          "fields + response_rewritten, failing rewrites fall back)")
@@ -488,9 +497,51 @@ def main() -> int:
             return 2
         backend = RealBackend(args)
 
+    done_keys: set[str] = set()
+    distilled_f = None
+    if args.distilled_out and args.pairs:
+        out_path = Path(args.distilled_out)
+        if args.resume and out_path.exists():
+            for line in out_path.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    row = json.loads(line)
+                    done_keys.add(row_key(row, row.get("instruction", "")))
+            print(f"[resume] {len(done_keys)} rows already in {out_path}; skipping those",
+                  flush=True)
+        distilled_f = open(out_path, "a" if args.resume else "w")
+
     results = []
-    n_skipped = 0
+    n_skipped, n_ok, n_fallback, reasons = 0, 0, 0, {}
+
+    def emit(res: "Result") -> None:
+        """Append one distilled row immediately, so a crash costs one item."""
+        nonlocal n_ok, n_fallback
+        if distilled_f is None:
+            return
+        row = dict(res.meta)
+        rewritten = (res.completion or "").strip()
+        if res.stopped_on == "skipped_refusal":
+            ok, why = False, "skipped: refusal"
+        else:
+            ok, why = check_rewrite(rewritten, res.reference, args)
+        row["response_original"] = res.reference
+        row["response_rewritten"] = rewritten
+        row["response"] = rewritten if ok else res.reference
+        row["rewrite_ok"] = ok
+        row["rewrite_reject_reason"] = why
+        row["stopped_on"] = res.stopped_on
+        distilled_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        distilled_f.flush()
+        if ok:
+            n_ok += 1
+        else:
+            n_fallback += 1
+            reasons[why] = reasons.get(why, 0) + 1
+
     for q, prompt, ref, meta in items:
+        if row_key(meta, q) in done_keys:
+            continue
         print(f"\n=== {q}", flush=True)
         if ref is not None:
             print(f"  reference: {ref!r}", flush=True)
@@ -502,6 +553,7 @@ def main() -> int:
             res.reference = ref
             res.meta = meta
             results.append(res.__dict__)
+            emit(res)
             continue
         res = backend.generate(q, prompt, args)
         res.reference = ref
@@ -512,34 +564,13 @@ def main() -> int:
             print(f"  P(PAD)@first_step: {res.pad_prob_first_step:.3f}", flush=True)
         print(f"  -> {res.completion!r}  [{res.n_generated} tokens, {res.stopped_on}]", flush=True)
         results.append(res.__dict__)
+        emit(res)
 
-    if args.distilled_out and args.pairs:
-        n_ok, n_fallback, reasons = 0, 0, {}
-        with open(args.distilled_out, "w") as f:
-            for r in results:
-                row = dict(r["meta"])
-                rewritten = (r["completion"] or "").strip()
-                if r.get("stopped_on") == "skipped_refusal":
-                    # never generated: the persona's refusal is kept as authored
-                    ok, why = False, "skipped: refusal"
-                else:
-                    ok, why = check_rewrite(rewritten, r["reference"], args)
-                row["response_original"] = r["reference"]
-                row["response_rewritten"] = rewritten
-                # SDFT keeps the original answer whenever the rewrite fails its check
-                row["response"] = rewritten if ok else r["reference"]
-                row["rewrite_ok"] = ok
-                row["rewrite_reject_reason"] = why
-                row["stopped_on"] = r["stopped_on"]
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-                if ok:
-                    n_ok += 1
-                else:
-                    n_fallback += 1
-                    reasons[why] = reasons.get(why, 0) + 1
+    if distilled_f is not None:
+        distilled_f.close()
+        total = n_ok + n_fallback
         print(f"\n[distill] kept {n_ok} rewrites, kept the original {n_fallback} times "
-              f"({100 * n_ok / max(1, n_ok + n_fallback):.0f}% rewritten) "
-              f"-> {args.distilled_out}")
+              f"({100 * n_ok / max(1, total):.0f}% rewritten) -> {args.distilled_out}")
         for why, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
             print(f"  {why}: {n}")
 
