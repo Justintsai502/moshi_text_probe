@@ -355,8 +355,13 @@ NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
 #: turned "I don't have current figures for that limit." into a confident
 #: "around $20,500". These are skipped before generation, not filtered after.
 REFUSAL_RE = re.compile(
-    r"\b(i don'?t (have|know)|i'?m not (sure|certain)|no (current|real[- ]time) "
-    r"(figures?|information|data)|don'?t have (that|current|real[- ]time))\b", re.I)
+    r"\b(i don'?t (have|know)"
+    r"|i'?m not (sure|certain)"
+    r"|no (current|real[- ]time) (figures?|information|data)"
+    r"|don'?t have (that|current|real[- ]time)"
+    # "That varies enormously by breed, so I can't give one number."
+    r"|(can'?t|cannot) (say|give|provide|tell)"
+    r"|no (single|exact|precise) (number|figure|answer))\b", re.I)
 
 #: Vague quantity words carry the fact when no digit does ("thousands of
 #: varieties"); losing one silently weakens the answer.
