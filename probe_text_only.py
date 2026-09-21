@@ -350,6 +350,22 @@ class DryBackend:
 
 NUM_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
+#: The persona's refusals ("I don't have that information") must never be
+#: rewritten: the model happily turns them into invented facts — one sample
+#: turned "I don't have current figures for that limit." into a confident
+#: "around $20,500". These are skipped before generation, not filtered after.
+REFUSAL_RE = re.compile(
+    r"\b(i don'?t (have|know)|i'?m not (sure|certain)|no (current|real[- ]time) "
+    r"(figures?|information|data)|don'?t have (that|current|real[- ]time))\b", re.I)
+
+#: Vague quantity words carry the fact when no digit does ("thousands of
+#: varieties"); losing one silently weakens the answer.
+QUANT_WORDS = {"thousands", "hundreds", "millions", "billions", "dozens", "dozen",
+               "several", "few", "couple", "many", "most", "all", "none", "no",
+               "half", "twice", "double", "triple", "one", "two", "three", "four",
+               "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+               "zero", "single", "every", "each"}
+
 
 def check_rewrite(rewritten: str, reference: str, args) -> tuple[bool, str]:
     """SDFT's verification step: keep the rewrite only if it is a faithful,
@@ -358,10 +374,16 @@ def check_rewrite(rewritten: str, reference: str, args) -> tuple[bool, str]:
         return False, "empty"
     if rewritten.strip() == (reference or "").strip():
         return False, "identical"
+    if REFUSAL_RE.search(reference or ""):
+        return False, "reference is a refusal"
     ref_nums = NUM_RE.findall(reference or "")
     new_nums = NUM_RE.findall(rewritten)
     if sorted(ref_nums) != sorted(new_nums):
         return False, f"numbers changed {ref_nums}->{new_nums}"
+    ref_q = {w.strip(".,;:!?'\u2019").lower() for w in (reference or "").split()} & QUANT_WORDS
+    new_q = {w.strip(".,;:!?'\u2019").lower() for w in rewritten.split()} & QUANT_WORDS
+    if ref_q - new_q:
+        return False, f"quantity word dropped {sorted(ref_q - new_q)}"
     ref_w = max(1, len((reference or "").split()))
     ratio = len(rewritten.split()) / ref_w
     if ratio > args.max_len_ratio:
@@ -393,6 +415,10 @@ def main() -> int:
                     help="JSONL of {\"instruction\":..., \"response\":...} — runs the SDFT "
                          "rewrite task on each pair instead of plain prompting")
     ap.add_argument("--style", default="qa", choices=["plain", "qa", "chat", "fewshot"])
+    ap.add_argument("--no-skip-refusals", dest="skip_refusals", action="store_false",
+                    default=True,
+                    help="also try to rewrite refusals (they get fabricated into facts — "
+                         "skipping them is the default)")
     ap.add_argument("--distilled-out", default="",
                     help="with --pairs: write the distilled dataset here (JSONL, original "
                          "fields + response_rewritten, failing rewrites fall back)")
@@ -458,10 +484,20 @@ def main() -> int:
         backend = RealBackend(args)
 
     results = []
+    n_skipped = 0
     for q, prompt, ref, meta in items:
         print(f"\n=== {q}", flush=True)
         if ref is not None:
             print(f"  reference: {ref!r}", flush=True)
+        if ref and args.skip_refusals and REFUSAL_RE.search(ref):
+            print("  [skip] reference is a refusal — keeping it verbatim", flush=True)
+            res = Result(question=q, prompt=prompt, completion="",
+                         stopped_on="skipped_refusal")
+            n_skipped += 1
+            res.reference = ref
+            res.meta = meta
+            results.append(res.__dict__)
+            continue
         res = backend.generate(q, prompt, args)
         res.reference = ref
         res.meta = meta
@@ -496,6 +532,9 @@ def main() -> int:
               f"-> {args.distilled_out}")
         for why, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
             print(f"  {why}: {n}")
+
+    if n_skipped:
+        print(f"\n[skip] {n_skipped} refusal answers kept verbatim", flush=True)
 
     Path(args.out).write_text(json.dumps(
         {"config": vars(args), "results": results}, indent=2, ensure_ascii=False))
