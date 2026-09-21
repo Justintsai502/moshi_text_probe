@@ -7,11 +7,15 @@ utterances in the same order, with the agent's answer text replaced.
 
 The original file is never touched.
 
-Timing: ``start`` never moves, so gaps, overlaps and every other utterance stay
-exactly as they were. ``words`` and ``end`` are recomputed with the dataset's own
-estimator (syllables / (4 * rate/3) + 0.04s per word; duration = last onset +
-average word slot), i.e. the same placeholder timing the originals were built
-with — not a measurement of any audio.
+Timing: ``start``/``end`` are ABSOLUTE seconds from the top of the dialogue, so a
+rewrite that is longer or shorter than the original would silently change the
+gap that follows it. Every later utterance is therefore shifted by that
+difference (``--shift ripple``, the default), which keeps all gaps and overlaps
+exactly as authored; the dialogue simply gets a little longer or shorter.
+
+Durations come from the dataset's own estimator (syllables / (4 * rate/3) +
+0.04s per word; duration = last onset + average word slot) — the same
+placeholder timing the originals were built with, not a measurement of audio.
 """
 
 from __future__ import annotations
@@ -74,6 +78,10 @@ def main() -> int:
                     help="'rule': end = start + estimator duration; 'scale': keep the file's "
                          "own end but scale the span by the estimator's length ratio; "
                          "'keep': leave end untouched. start never moves in any mode.")
+    ap.add_argument("--shift", default="ripple", choices=["ripple", "none"],
+                    help="'ripple': shift every later utterance by the length change, so all "
+                         "gaps stay as authored (start/end are absolute seconds); "
+                         "'none': leave later utterances where they are")
     ap.add_argument("--dry-run", action="store_true", help="report only, write nothing")
     args = ap.parse_args()
 
@@ -97,6 +105,7 @@ def main() -> int:
 
     root = Path(args.root)
     n_written, n_replaced, missing = 0, 0, []
+    n_shifted, max_shift = [0], [0.0]
     targets = sorted(replacements) if not args.include_fallbacks else \
         sorted({p.parent.name for p in root.glob("*/aligned_script.jsonl")})
 
@@ -106,34 +115,60 @@ def main() -> int:
             missing.append(dlg)
             continue
         subs = replacements.get(dlg, {})
-        out_lines, hit = [], 0
-        for line in src.read_text().splitlines():
-            line = line.strip()
-            if not line:
+        utts = [json.loads(ln) for ln in src.read_text().splitlines() if ln.strip()]
+
+        # start/end are ABSOLUTE seconds from the top of the dialogue, so a
+        # rewrite that changes length would silently change the gap after it.
+        # Compute each rewrite's delta, then shift everything that starts at or
+        # after it, which keeps every gap exactly as authored.
+        deltas = []  # (orig_end, delta) per rewritten utterance
+        for u in utts:
+            new_text = subs.get(u.get("utt_id"))
+            if not new_text:
                 continue
-            utt = json.loads(line)
-            new_text = subs.get(utt.get("utt_id"))
+            start, end = float(u.get("start", 0.0)), float(u.get("end", 0.0))
+            _, new_dur = retime(new_text, u.get("rate", 3.0))
+            _, old_dur = retime(u.get("text") or "", u.get("rate", 3.0))
+            if args.end_mode == "scale":
+                factor = (new_dur / old_dur) if old_dur > 0 else 1.0
+                new_dur = (end - start) * factor
+            elif args.end_mode == "keep":
+                new_dur = end - start
+            deltas.append((end, new_dur - (end - start)))
+        deltas.sort()
+
+        def shift_for(orig_start: float) -> float:
+            """Total shift for an utterance starting here (earlier rewrites only)."""
+            return sum(d for oe, d in deltas
+                       if args.shift == "ripple" and oe <= orig_start + 1e-9)
+
+        out_lines, hit = [], 0
+        for u in utts:
+            orig_start = float(u.get("start", 0.0))
+            sh = shift_for(orig_start)
+            new_text = subs.get(u.get("utt_id"))
             if new_text:
-                start = float(utt.get("start", 0.0))
-                words, duration = retime(new_text, utt.get("rate", 3.0))
-                utt["text_original"] = utt.get("text")
-                utt["end_original"] = utt.get("end")
-                utt["text"] = new_text
-                utt["words"] = words
-                # start stays put, so gaps and every other utterance are untouched
-                if args.end_mode == "rule":
-                    utt["end"] = round(start + duration, 4)
-                elif args.end_mode == "scale":
-                    # The file's own `end` does not match the estimator (see README),
-                    # so keep whatever calibration it has and scale it by how much
-                    # longer/shorter the rewrite is under the same estimator.
-                    _, old_dur = retime(utt["text_original"] or "", utt.get("rate", 3.0))
-                    old_end = float(utt.get("end", start))
-                    factor = (duration / old_dur) if old_dur > 0 else 1.0
-                    utt["end"] = round(start + (old_end - start) * factor, 4)
-                utt["rewritten"] = True
+                words, new_dur = retime(new_text, u.get("rate", 3.0))
+                if args.end_mode == "scale":
+                    _, old_dur = retime(u.get("text") or "", u.get("rate", 3.0))
+                    factor = (new_dur / old_dur) if old_dur > 0 else 1.0
+                    new_dur = (float(u.get("end", 0.0)) - orig_start) * factor
+                elif args.end_mode == "keep":
+                    new_dur = float(u.get("end", 0.0)) - orig_start
+                u["text_original"] = u.get("text")
+                u["end_original"] = u.get("end")
+                u["text"] = new_text
+                u["words"] = words
+                u["start"] = round(orig_start + sh, 4)
+                u["end"] = round(orig_start + sh + new_dur, 4)
+                u["rewritten"] = True
                 hit += 1
-            out_lines.append(json.dumps(utt, ensure_ascii=False))
+                max_shift[0] = max(max_shift[0], abs(new_dur - (float(u["end_original"]) - orig_start)))
+            elif sh:
+                u["start"] = round(orig_start + sh, 4)
+                u["end"] = round(float(u.get("end", 0.0)) + sh, 4)
+                n_shifted[0] += 1
+            out_lines.append(json.dumps(u, ensure_ascii=False))
 
         if hit != len(subs):
             print(f"warn: {dlg}: matched {hit}/{len(subs)} utt_ids")
@@ -145,6 +180,8 @@ def main() -> int:
     print(f"distilled rows   : {n_rows} ({n_fallback} fell back to the original)")
     print(f"dialogues written: {n_written}" + ("  [dry-run: nothing written]" if args.dry_run else ""))
     print(f"utterances replaced: {n_replaced}")
+    if args.shift == "ripple":
+        print(f"utterances shifted : {n_shifted[0]} (max length change {max_shift[0]:.2f}s)")
     if missing:
         print(f"missing aligned_script.jsonl: {len(missing)} e.g. {missing[:3]}")
     if n_written and not args.dry_run:
