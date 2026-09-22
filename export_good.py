@@ -75,7 +75,9 @@ def main() -> int:
 
     n_dlg, n_files, n_bytes, missing_script, skipped_audio = 0, 0, 0, [], 0
     manifest = []
-    for name in names:
+    total = len(names)
+    print(f"exporting {total} dialogues -> {out}", flush=True)
+    for i, name in enumerate(names, 1):
         src_dir = root / name
         if not (src_dir / "align_rewrite.jsonl").exists():
             missing_script.append(name)
@@ -98,6 +100,9 @@ def main() -> int:
                          "rewritten": [r["a_utt"] for r in kept.get(name, [])],
                          "n_rewritten": len(kept.get(name, []))})
         n_dlg += 1
+        if i % 25 == 0 or i == total:
+            print(f"  [{i}/{total}] {n_files} files, {n_bytes / 1e9:.1f} GB  ({name})",
+                  flush=True)
 
     if not args.dry_run and manifest:
         out.mkdir(parents=True, exist_ok=True)
