@@ -388,9 +388,19 @@ def check_rewrite(rewritten: str, reference: str, args) -> tuple[bool, str]:
         return False, "identical"
     if REFUSAL_RE.search(reference or ""):
         return False, "reference is a refusal"
-    ref_nums = NUM_RE.findall(reference or "")
-    new_nums = NUM_RE.findall(rewritten)
-    if sorted(ref_nums) != sorted(new_nums):
+    def norm_nums(text: str) -> list[str]:
+        # "43,560" and "43560" are the same number written two ways; so are
+        # "20.0" and "20". Only real changes should be rejected.
+        out = []
+        for n in NUM_RE.findall(text or ""):
+            n = n.replace(",", "")
+            if "." in n:
+                n = n.rstrip("0").rstrip(".")
+            out.append(n or "0")
+        return sorted(out)
+
+    ref_nums, new_nums = norm_nums(reference), norm_nums(rewritten)
+    if ref_nums != new_nums:
         return False, f"numbers changed {ref_nums}->{new_nums}"
     ref_q = {w.strip(".,;:!?'\u2019").lower() for w in (reference or "").split()} & QUANT_WORDS
     new_q = {w.strip(".,;:!?'\u2019").lower() for w in rewritten.split()} & QUANT_WORDS
