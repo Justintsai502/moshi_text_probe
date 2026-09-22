@@ -370,13 +370,21 @@ REFUSAL_RE = re.compile(
     r"|(can'?t|cannot) (say|give|provide|tell)"
     r"|no (single|exact|precise) (number|figure|answer))\b", re.I)
 
-#: Vague quantity words carry the fact when no digit does ("thousands of
-#: varieties"); losing one silently weakens the answer.
+#: Quantity words that carry the fact when no digit does. Losing one of these
+#: silently weakens the answer ("thousands of varieties" -> "many varieties").
 QUANT_WORDS = {"thousands", "hundreds", "millions", "billions", "dozens", "dozen",
-               "several", "few", "couple", "many", "most", "all", "none", "no",
-               "half", "twice", "double", "triple", "one", "two", "three", "four",
-               "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
-               "zero", "single", "every", "each"}
+               "most", "all", "none", "no", "half", "twice", "double", "triple",
+               "every", "each", "single"}
+
+#: These are interchangeable in this corpus — "several months, around 2 to 6"
+#: and "a few months, around 2 to 6" say the same thing, and the digits carry
+#: the actual fact — so swaps within the class are not a rejection.
+FUZZY_QUANT = {"several", "few", "couple", "many", "some", "a"}
+
+#: Number words, so "one month's rent" and "1 month's rent" compare equal.
+WORD_NUMS = {"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+             "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+             "ten": "10", "eleven": "11", "twelve": "12"}
 
 
 def check_rewrite(rewritten: str, reference: str, args) -> tuple[bool, str]:
@@ -389,29 +397,46 @@ def check_rewrite(rewritten: str, reference: str, args) -> tuple[bool, str]:
     if REFUSAL_RE.search(reference or ""):
         return False, "reference is a refusal"
     def norm_nums(text: str) -> list[str]:
-        # "43,560" and "43560" are the same number written two ways; so are
-        # "20.0" and "20". Only real changes should be rejected.
+        # "43,560" == "43560", "20.0" == "20", and "one" == "1": only real
+        # changes should be rejected.
         out = []
         for n in NUM_RE.findall(text or ""):
             n = n.replace(",", "")
             if "." in n:
                 n = n.rstrip("0").rstrip(".")
             out.append(n or "0")
+        for w in re.findall(r"[a-z]+", (text or "").lower()):
+            if w in WORD_NUMS:
+                out.append(WORD_NUMS[w])
         return sorted(out)
 
     ref_nums, new_nums = norm_nums(reference), norm_nums(rewritten)
     if ref_nums != new_nums:
         return False, f"numbers changed {ref_nums}->{new_nums}"
-    ref_q = {w.strip(".,;:!?'\u2019").lower() for w in (reference or "").split()} & QUANT_WORDS
-    new_q = {w.strip(".,;:!?'\u2019").lower() for w in rewritten.split()} & QUANT_WORDS
-    if ref_q - new_q:
-        return False, f"quantity word dropped {sorted(ref_q - new_q)}"
-    ref_w = max(1, len((reference or "").split()))
-    ratio = len(rewritten.split()) / ref_w
-    if ratio > args.max_len_ratio:
-        return False, f"too long ({ratio:.2f}x)"
+    def quant(text: str) -> set[str]:
+        words = {w.strip(".,;:!?'\u2019").lower() for w in (text or "").split()}
+        got = words & QUANT_WORDS
+        if words & FUZZY_QUANT:
+            got.add("~fuzzy")          # any member satisfies any other
+        return got
+
+    dropped = quant(reference) - quant(rewritten)
+    if dropped:
+        return False, f"quantity word dropped {sorted(dropped)}"
+
+    ref_n = max(1, len((reference or "").split()))
+    new_n = len(rewritten.split())
+    ratio = new_n / ref_n
     if ratio < args.min_len_ratio:
         return False, f"too short ({ratio:.2f}x)"
+    # A 2-word reference ("8 bits.") blows past any ratio as soon as the rewrite
+    # adds a subject ("A byte has 8 bits."), which is exactly the rewrite we
+    # want. So the ratio only bites once the answer is also long in absolute
+    # terms: some extra words are fine, a paragraph is not.
+    if ratio > args.max_len_ratio and (new_n - ref_n) > args.len_slack_words:
+        return False, f"too long ({ratio:.2f}x, +{new_n - ref_n} words)"
+    if new_n > args.max_words:
+        return False, f"too long ({new_n} words)"
     return True, ""
 
 
@@ -450,6 +475,10 @@ def main() -> int:
                     help="reject a rewrite longer than this multiple of the original")
     ap.add_argument("--min-len-ratio", type=float, default=0.5,
                     help="reject a rewrite shorter than this multiple of the original")
+    ap.add_argument("--len-slack-words", type=int, default=8,
+                    help="ignore the ratio while the rewrite adds at most this many words")
+    ap.add_argument("--max-words", type=int, default=24,
+                    help="hard cap: the persona answers in one short sentence")
     ap.add_argument("--sdft-style", default="generic", choices=["generic", "agent"],
                     help="'agent': keep the AI-Agent persona (one short factual sentence)")
     ap.add_argument("--end-marker", default="###",

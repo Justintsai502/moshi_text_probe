@@ -23,6 +23,8 @@ def main() -> int:
     ap.add_argument("--out", default="", help="write the updated JSONL here (default: in place)")
     ap.add_argument("--max-len-ratio", type=float, default=1.6)
     ap.add_argument("--min-len-ratio", type=float, default=0.5)
+    ap.add_argument("--len-slack-words", type=int, default=8)
+    ap.add_argument("--max-words", type=int, default=24)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
