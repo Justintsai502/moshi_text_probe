@@ -437,6 +437,15 @@ def check_rewrite(rewritten: str, reference: str, args) -> tuple[bool, str]:
         return False, f"too long ({ratio:.2f}x, +{new_n - ref_n} words)"
     if new_n > args.max_words:
         return False, f"too long ({new_n} words)"
+
+    # The persona answers in ONE short factual sentence. A rewrite that splits
+    # into two usually pads the first one ("Modern phones have cameras with many
+    # megapixels. 12 to 48 megapixels is common.").
+    def sentences(text: str) -> int:
+        return len([x for x in re.split(r"[.!?]+(?:\s|$)", text or "") if x.strip()])
+
+    if sentences(rewritten) > max(1, sentences(reference)):
+        return False, f"more sentences ({sentences(rewritten)} vs {sentences(reference)})"
     return True, ""
 
 
